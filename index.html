@@ -314,6 +314,13 @@
 
   .field-note{ font-size: 11.5px; color: var(--muted); }
 
+  .check-row{ display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .check-row input{ accent-color: var(--accent); flex: none; }
+
+  .fit-note{ font-size: 12px; margin: 0; display: none; }
+  .fit-note.warn{ display: block; color: var(--danger); font-weight: 600; }
+  .fit-note.ok{ display: block; color: var(--muted); }
+
   .export-row{ display: grid; gap: 10px; }
   .name-row{ display: flex; gap: 8px; }
   .name-row input[type="text"]{
@@ -413,6 +420,8 @@
           <input type="range" id="maskRange" min="0.05" max="1" step="0.01" value="1">
           <output class="mono" id="maskOut">100%</output>
         </div>
+        <label class="check-row"><input type="checkbox" id="gapHighlight" checked> Highlight uncovered gaps on the stage</label>
+        <p class="fit-note" id="fitNote" role="status" aria-live="polite"></p>
         <p class="field-note">100% touches the edges of the square. Click "Move mask" on the stage, then drag to recenter it and scroll to resize &mdash; good for a hand-drawn border whose hole isn't perfectly round or centered.</p>
       </details>
 
@@ -456,7 +465,7 @@
     counters: {},
     border: null,
     maskSize: 1,
-    maskOffsetX: 0, maskOffsetY: 0, maskMoveMode: false,
+    maskOffsetX: 0, maskOffsetY: 0, maskMoveMode: false, showGaps: true,
     outputSize: "1024",
     zoom: 1, offsetX: 0, offsetY: 0
   };
@@ -480,6 +489,8 @@
   var resetCountBtn = document.getElementById("resetCountBtn");
   var nextFilePreview = document.getElementById("nextFilePreview");
   var stageHint = document.getElementById("stageHint");
+  var fitNote = document.getElementById("fitNote");
+  var gapHighlight = document.getElementById("gapHighlight");
 
   // Resolves with both the image and its object URL. The URL has to outlive
   // the load: the tile thumbnail renders from the same one, and a revoked URL
@@ -517,7 +528,7 @@
     ctx.stroke();
   }
 
-  function draw(ctx, size){
+  function drawMaskedArt(ctx, size){
     ctx.clearRect(0, 0, size, size);
 
     if(state.artwork){
@@ -542,15 +553,167 @@
     ctx.arc(mcx, mcy, r, 0, Math.PI*2);
     ctx.fill();
     ctx.restore();
+  }
 
+  function draw(ctx, size){
+    drawMaskedArt(ctx, size);
     if(state.border){
       ctx.drawImage(state.border, 0, 0, size, size);
     }
   }
 
-  function renderPreview(){
+  // ---- fit check --------------------------------------------------------
+  // A dark token on a black ring hides misalignment from the eye, but not
+  // from the alpha channel: any pixel inside the ring's opening that the
+  // masked art doesn't cover is a hole you'd see through in the VTT. This
+  // finds those pixels and paints them, so the problem is visible regardless
+  // of how dark the art and the border are.
+  var CHECK_SIZE = 320;
+  var GAP_WARN = 0.005;          // fraction of the opening left uncovered
+  var ALPHA_FLOOR = 24;          // below this a pixel counts as transparent
+
+  var checkCanvas = document.createElement("canvas");
+  checkCanvas.width = checkCanvas.height = CHECK_SIZE;
+  var checkCtx = checkCanvas.getContext("2d", { willReadFrequently: true });
+  var gapCanvas = document.createElement("canvas");
+  gapCanvas.width = gapCanvas.height = CHECK_SIZE;
+  var gapCtx = gapCanvas.getContext("2d");
+
+  var holeMask = null, holeCount = 0;   // the border's opening, 1 byte per pixel
+  var borderSealed = false;             // border paints over its own centre
+  var gapRatio = 0, gapHint = "";   // gapHint is "" when the gap is even all round
+  var checkTimer = null;
+
+  // The opening is the transparent region of the border connected to the
+  // centre. Flood-filled once per border image -- it doesn't move when the
+  // mask does, so there's no need to recompute it while dragging.
+  function computeHole(){
+    holeMask = null; holeCount = 0; borderSealed = false;
+    if(!state.border) return;
+    checkCtx.clearRect(0, 0, CHECK_SIZE, CHECK_SIZE);
+    checkCtx.drawImage(state.border, 0, 0, CHECK_SIZE, CHECK_SIZE);
+    var px = checkCtx.getImageData(0, 0, CHECK_SIZE, CHECK_SIZE).data;
+    var n = CHECK_SIZE * CHECK_SIZE;
+    var open = new Uint8Array(n);
+    for(var i = 0; i < n; i++) open[i] = px[i*4 + 3] < ALPHA_FLOOR ? 1 : 0;
+
+    var mid = (CHECK_SIZE/2) | 0;
+    var start = mid * CHECK_SIZE + mid;
+    // A border with no opening hides the art entirely, so there is no gap to
+    // see and nothing worth warning about.
+    if(!open[start]){ borderSealed = true; return; }
+
+    var mask = new Uint8Array(n), stack = [start], count = 0, leaked = false;
+    mask[start] = 1;
+    while(stack.length){
+      var q = stack.pop(); count++;
+      var x = q % CHECK_SIZE, y = (q / CHECK_SIZE) | 0;
+      if(x === 0 || y === 0 || x === CHECK_SIZE-1 || y === CHECK_SIZE-1) leaked = true;
+      if(x > 0            && open[q-1]          && !mask[q-1])          { mask[q-1]=1;          stack.push(q-1); }
+      if(x < CHECK_SIZE-1 && open[q+1]          && !mask[q+1])          { mask[q+1]=1;          stack.push(q+1); }
+      if(y > 0            && open[q-CHECK_SIZE] && !mask[q-CHECK_SIZE]) { mask[q-CHECK_SIZE]=1; stack.push(q-CHECK_SIZE); }
+      if(y < CHECK_SIZE-1 && open[q+CHECK_SIZE] && !mask[q+CHECK_SIZE]) { mask[q+CHECK_SIZE]=1; stack.push(q+CHECK_SIZE); }
+    }
+    // Reaching the edge means the ring isn't closed, so there's no enclosed
+    // opening to measure -- fall back to the mask circle instead.
+    if(leaked) return;
+    holeMask = mask; holeCount = count;
+  }
+
+  function compass(dx, dy){
+    var a = Math.atan2(dy, dx) * 180 / Math.PI;
+    var names = ["right", "lower-right", "bottom", "lower-left", "left", "upper-left", "top", "upper-right"];
+    return names[(Math.round(a / 45) + 8) % 8];
+  }
+
+  function runFitCheck(){
+    checkTimer = null;
+    gapRatio = 0; gapHint = "";
+    gapCtx.clearRect(0, 0, CHECK_SIZE, CHECK_SIZE);
+    if(!state.artwork || borderSealed){ updateFitNote(); return; }
+
+    drawMaskedArt(checkCtx, CHECK_SIZE);
+    var px = checkCtx.getImageData(0, 0, CHECK_SIZE, CHECK_SIZE).data;
+
+    // Without a usable border opening, judge the mask circle itself: a gap
+    // then means the art doesn't fill the mask you asked for.
+    var useHole = !!holeMask;
+    var mcx = CHECK_SIZE/2 + state.maskOffsetX*CHECK_SIZE;
+    var mcy = CHECK_SIZE/2 + state.maskOffsetY*CHECK_SIZE;
+    var r = (CHECK_SIZE/2) * state.maskSize, r2 = r*r;
+
+    var out = gapCtx.createImageData(CHECK_SIZE, CHECK_SIZE), g = out.data;
+    var region = 0, gaps = 0, sx = 0, sy = 0, hx = 0, hy = 0;
+
+    for(var y = 0; y < CHECK_SIZE; y++){
+      for(var x = 0; x < CHECK_SIZE; x++){
+        var i = y*CHECK_SIZE + x, inside;
+        if(useHole) inside = holeMask[i] === 1;
+        else { var ddx = x - mcx, ddy = y - mcy; inside = ddx*ddx + ddy*ddy <= r2; }
+        if(!inside) continue;
+        region++; hx += x; hy += y;
+        if(px[i*4 + 3] < ALPHA_FLOOR){
+          gaps++; sx += x; sy += y;
+          g[i*4] = 255; g[i*4+1] = 0; g[i*4+2] = 170; g[i*4+3] = 255;
+        }
+      }
+    }
+
+    if(region > 0){
+      gapRatio = gaps / region;
+      if(gaps > 0){
+        // A concentric gap means the mask is simply too small; only call it a
+        // direction when the gap's centre of mass is genuinely off to one side,
+        // otherwise sub-pixel noise invents a bearing that isn't there.
+        var dx = sx/gaps - hx/region, dy = sy/gaps - hy/region;
+        var holeRadius = Math.sqrt(region / Math.PI);
+        gapHint = Math.sqrt(dx*dx + dy*dy) > holeRadius * 0.15 ? compass(dx, dy) : "";
+      }
+    }
+    if(gapRatio > GAP_WARN) gapCtx.putImageData(out, 0, 0);
+    updateFitNote();
+    renderPreview(false);
+  }
+
+  function fitWarning(){
+    if(gapRatio <= GAP_WARN) return null;
+    return (gapRatio*100).toFixed(1) + "% of the " +
+      (holeMask ? "ring's opening" : "mask") + " is uncovered" +
+      (gapHint ? " toward the " + gapHint + " — the mask is off-centre"
+               : " all round — the mask is too small");
+  }
+
+  function updateFitNote(){
+    var warn = fitWarning();
+    if(warn){
+      fitNote.textContent = "⚠ " + warn + ".";
+      fitNote.className = "fit-note warn";
+    } else if(state.artwork && holeMask){
+      fitNote.textContent = "Mask covers the ring's opening.";
+      fitNote.className = "fit-note ok";
+    } else {
+      fitNote.textContent = "";
+      fitNote.className = "fit-note";
+    }
+  }
+
+  function scheduleFitCheck(){
+    if(checkTimer) clearTimeout(checkTimer);
+    checkTimer = setTimeout(runFitCheck, 120);
+  }
+
+  function renderPreview(schedule){
     var size = stageCanvas.width;
     draw(stageCtx, size);
+
+    if(state.showGaps && gapRatio > GAP_WARN){
+      stageCtx.save();
+      stageCtx.imageSmoothingEnabled = false;
+      stageCtx.globalAlpha = 0.9;
+      stageCtx.drawImage(gapCanvas, 0, 0, size, size);
+      stageCtx.restore();
+    }
+
     if(state.maskMoveMode){
       var mcx = size/2 + state.maskOffsetX*size, mcy = size/2 + state.maskOffsetY*size;
       var r = (size/2) * state.maskSize;
@@ -564,6 +727,7 @@
       stageCtx.restore();
     }
     emptyNote.style.display = state.artwork ? "none" : "flex";
+    if(schedule !== false) scheduleFitCheck();
   }
 
   function getComposeSize(){
@@ -672,7 +836,9 @@
       resultUrl = URL.createObjectURL(blob);
       resultImg.src = resultUrl;
       resultBlock.hidden = false;
-      resultNote.textContent = finalCanvas.width + "×" + finalCanvas.height + " px · " + Math.round(blob.size/1024) + " KB";
+      var warn = fitWarning();
+      resultNote.textContent = finalCanvas.width + "×" + finalCanvas.height + " px · " +
+        Math.round(blob.size/1024) + " KB" + (warn ? " · ⚠ " + warn : "");
 
       var used = null;
       try{
@@ -743,6 +909,7 @@
         setZoom(1);
       } else if(kind === "border"){
         state.border = loaded.img;
+        computeHole();
       }
       setTileThumb(tile, loaded.img, file.name);
       exportBtn.disabled = !state.artwork;
@@ -782,7 +949,7 @@
     var kind = tile.id === "tile-art" ? "art" : "border";
     releaseLayer(kind);
     if(kind === "art"){ state.artwork = null; state.artworkName = ""; }
-    if(kind === "border"){ state.border = null; }
+    if(kind === "border"){ state.border = null; computeHole(); }
     tile.classList.remove("has-image");
     var thumb = tile.querySelector("img.thumb");
     if(thumb) thumb.remove();
@@ -895,6 +1062,11 @@
     }
     renderPreview();
   }, { passive: false });
+
+  gapHighlight.addEventListener("change", function(){
+    state.showGaps = gapHighlight.checked;
+    renderPreview();
+  });
 
   exportBtn.addEventListener("click", exportToken);
 
