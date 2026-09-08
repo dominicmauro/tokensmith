@@ -107,7 +107,7 @@
     margin: 6px 0 0;
     color: var(--muted);
     font-size: 14.5px;
-    max-width: 56ch;
+    max-width: 72ch;
   }
 
   /* workbench */
@@ -453,7 +453,7 @@
 
   var state = {
     artwork: null, artworkName: "",
-    tokenCounterName: null, tokenCounter: 1,
+    counters: {},
     border: null,
     maskSize: 1,
     maskOffsetX: 0, maskOffsetY: 0, maskMoveMode: false,
@@ -606,6 +606,8 @@
 
   function pad2(n){ return (n < 10 ? "0" : "") + n; }
 
+  function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+
   // The previewed result's object URL, released when the next export replaces it.
   var resultUrl = null;
 
@@ -614,22 +616,31 @@
     return v || null;
   }
 
-  function nextCounterFor(name){
-    return (name && name === state.tokenCounterName) ? state.tokenCounter : 1;
+  function sanitize(s){ return s.replace(/[^a-z0-9_-]+/gi, ""); }
+
+  // The filename stem for the current export: the typed name, or the
+  // artwork's own basename with a -token suffix when nothing is typed.
+  function currentStem(){
+    var typed = typedName();
+    if(typed) return sanitize(typed) || "token";
+    var base = state.artworkName ? state.artworkName.replace(/\.[^.]+$/, "") : "tokensmith";
+    return (sanitize(base) || "token") + "-token";
   }
 
-  function buildFilename(name, counter){
-    if(!name){
-      var base = state.artworkName ? state.artworkName.replace(/\.[^.]+$/, "") : "tokensmith";
-      return base + "-token.png";
-    }
-    var safe = name.replace(/[^a-z0-9_-]+/gi, "") || "token";
-    return safe + pad2(counter) + ".png";
+  // Counters are kept per stem, so switching between two names and back
+  // resumes that name's numbering instead of restarting at 01 and
+  // overwriting tokens already saved.
+  function nextCounterFor(stem){
+    return state.counters[stem] || 1;
+  }
+
+  function buildFilename(stem, counter){
+    return stem + pad2(counter) + ".png";
   }
 
   function updateNamePreview(){
-    var name = typedName();
-    nextFilePreview.textContent = "Next file: " + buildFilename(name, nextCounterFor(name));
+    var stem = currentStem();
+    nextFilePreview.textContent = "Next file: " + buildFilename(stem, nextCounterFor(stem));
   }
 
   async function exportToken(){
@@ -647,14 +658,14 @@
     var target = state.outputSize === "match" ? composeSize : Number(state.outputSize);
     var finalCanvas = target < composeSize ? downscale(full, target) : full;
 
-    var name = typedName();
-    var counter = nextCounterFor(name);
-    var filename = buildFilename(name, counter);
+    var stem = currentStem();
+    var counter = nextCounterFor(stem);
+    var filename = buildFilename(stem, counter);
 
     finalCanvas.toBlob(async function(blob){
       if(!blob){ setStatus("Export failed — try a smaller output size.", "err"); exportBtn.disabled = false; return; }
 
-      if(name){ state.tokenCounterName = name; state.tokenCounter = counter + 1; }
+      state.counters[stem] = counter + 1;
       updateNamePreview();
 
       if(resultUrl) URL.revokeObjectURL(resultUrl);
@@ -735,6 +746,7 @@
       }
       setTileThumb(tile, loaded.img, file.name);
       exportBtn.disabled = !state.artwork;
+      updateNamePreview();
       renderPreview();
     }).catch(function(){
       setStatus("Couldn't read that file — try a PNG, JPG, or WebP.", "err");
@@ -781,6 +793,7 @@
     var input = tile.querySelector('input[type="file"]');
     input.value = "";
     exportBtn.disabled = !state.artwork;
+    updateNamePreview();
     renderPreview();
   }
 
@@ -789,7 +802,7 @@
 
   // ---- mask ----
   function setMaskSize(v){
-    state.maskSize = Math.max(0.05, Math.min(1, v));
+    state.maskSize = clamp(v, 0.05, 1);
     maskRange.value = state.maskSize;
     maskOut.textContent = Math.round(state.maskSize * 100) + "%";
   }
@@ -823,7 +836,7 @@
 
   // ---- zoom / rotate sliders ----
   function setZoom(v){
-    state.zoom = Math.max(0.5, Math.min(4, v));
+    state.zoom = clamp(v, 0.5, 4);
     zoomRange.value = state.zoom;
     zoomOut.textContent = state.zoom.toFixed(2) + "×";
   }
@@ -860,7 +873,12 @@
     var rect = stageCanvas.getBoundingClientRect();
     var nx = startOffsetX + (e.clientX - dragStartX) / rect.width;
     var ny = startOffsetY + (e.clientY - dragStartY) / rect.height;
-    if(state.maskMoveMode){ state.maskOffsetX = nx; state.maskOffsetY = ny; }
+    // Keep the mask's center inside the square; dragging it clear of the
+    // canvas used to produce a fully transparent export with no warning.
+    if(state.maskMoveMode){
+      state.maskOffsetX = clamp(nx, -0.5, 0.5);
+      state.maskOffsetY = clamp(ny, -0.5, 0.5);
+    }
     else { state.offsetX = nx; state.offsetY = ny; }
     renderPreview();
   });
@@ -882,9 +900,7 @@
 
   tokenNameInput.addEventListener("input", updateNamePreview);
   resetCountBtn.addEventListener("click", function(){
-    var name = typedName();
-    state.tokenCounterName = name;
-    state.tokenCounter = 1;
+    delete state.counters[currentStem()];
     updateNamePreview();
   });
 
