@@ -481,14 +481,27 @@
   var nextFilePreview = document.getElementById("nextFilePreview");
   var stageHint = document.getElementById("stageHint");
 
+  // Resolves with both the image and its object URL. The URL has to outlive
+  // the load: the tile thumbnail renders from the same one, and a revoked URL
+  // won't load into a fresh <img>. releaseLayer() frees it when the layer is
+  // replaced or cleared.
   function fileToImage(file){
     return new Promise(function(resolve, reject){
       var url = URL.createObjectURL(file);
       var img = new Image();
-      img.onload = function(){ URL.revokeObjectURL(url); resolve(img); };
+      img.onload = function(){ resolve({ img: img, url: url }); };
       img.onerror = function(e){ URL.revokeObjectURL(url); reject(e); };
       img.src = url;
     });
+  }
+
+  var layerUrls = { art: null, border: null };
+
+  function releaseLayer(kind){
+    if(layerUrls[kind]){
+      URL.revokeObjectURL(layerUrls[kind]);
+      layerUrls[kind] = null;
+    }
   }
 
   function drawPlaceholderArt(ctx, size){
@@ -593,6 +606,9 @@
 
   function pad2(n){ return (n < 10 ? "0" : "") + n; }
 
+  // The previewed result's object URL, released when the next export replaces it.
+  var resultUrl = null;
+
   function typedName(){
     var v = tokenNameInput.value.trim();
     return v || null;
@@ -641,7 +657,9 @@
       if(name){ state.tokenCounterName = name; state.tokenCounter = counter + 1; }
       updateNamePreview();
 
-      resultImg.src = URL.createObjectURL(blob);
+      if(resultUrl) URL.revokeObjectURL(resultUrl);
+      resultUrl = URL.createObjectURL(blob);
+      resultImg.src = resultUrl;
       resultBlock.hidden = false;
       resultNote.textContent = finalCanvas.width + "×" + finalCanvas.height + " px · " + Math.round(blob.size/1024) + " KB";
 
@@ -704,16 +722,18 @@
   }
 
   function handleFile(file, tile, kind){
-    fileToImage(file).then(function(img){
+    fileToImage(file).then(function(loaded){
+      releaseLayer(kind);
+      layerUrls[kind] = loaded.url;
       if(kind === "art"){
-        state.artwork = img;
+        state.artwork = loaded.img;
         state.artworkName = file.name;
-        state.offsetX = 0; state.offsetY = 0; state.zoom = 1;
-        zoomRange.value = 1; zoomOut.textContent = "1.00×";
+        state.offsetX = 0; state.offsetY = 0;
+        setZoom(1);
       } else if(kind === "border"){
-        state.border = img;
+        state.border = loaded.img;
       }
-      setTileThumb(tile, img, file.name);
+      setTileThumb(tile, loaded.img, file.name);
       exportBtn.disabled = !state.artwork;
       renderPreview();
     }).catch(function(){
@@ -748,6 +768,7 @@
 
   function clearTile(tile){
     var kind = tile.id === "tile-art" ? "art" : "border";
+    releaseLayer(kind);
     if(kind === "art"){ state.artwork = null; state.artworkName = ""; }
     if(kind === "border"){ state.border = null; }
     tile.classList.remove("has-image");
@@ -767,9 +788,13 @@
   wireUpload("file-border", "tile-border", "border");
 
   // ---- mask ----
-  maskRange.addEventListener("input", function(){
-    state.maskSize = Number(maskRange.value);
+  function setMaskSize(v){
+    state.maskSize = Math.max(0.05, Math.min(1, v));
+    maskRange.value = state.maskSize;
     maskOut.textContent = Math.round(state.maskSize * 100) + "%";
+  }
+  maskRange.addEventListener("input", function(){
+    setMaskSize(Number(maskRange.value));
     renderPreview();
   });
   moveModeBtn.addEventListener("click", function(){
@@ -797,9 +822,13 @@
   });
 
   // ---- zoom / rotate sliders ----
-  zoomRange.addEventListener("input", function(){
-    state.zoom = Number(zoomRange.value);
+  function setZoom(v){
+    state.zoom = Math.max(0.5, Math.min(4, v));
+    zoomRange.value = state.zoom;
     zoomOut.textContent = state.zoom.toFixed(2) + "×";
+  }
+  zoomRange.addEventListener("input", function(){
+    setZoom(Number(zoomRange.value));
     renderPreview();
   });
   document.getElementById("recenterBtn").addEventListener("click", function(){
@@ -807,9 +836,10 @@
     renderPreview();
   });
   document.getElementById("resetAllBtn").addEventListener("click", function(){
-    state.zoom = 1; state.offsetX = 0; state.offsetY = 0;
+    state.offsetX = 0; state.offsetY = 0;
     state.maskOffsetX = 0; state.maskOffsetY = 0;
-    zoomRange.value = 1; zoomOut.textContent = "1.00×";
+    setZoom(1);
+    setMaskSize(1);
     renderPreview();
   });
 
@@ -841,15 +871,9 @@
   stageCanvas.addEventListener("wheel", function(e){
     e.preventDefault();
     if(state.maskMoveMode){
-      var mdelta = e.deltaY > 0 ? -0.01 : 0.01;
-      state.maskSize = Math.max(0.05, Math.min(1, state.maskSize + mdelta));
-      maskRange.value = state.maskSize;
-      maskOut.textContent = Math.round(state.maskSize * 100) + "%";
+      setMaskSize(state.maskSize + (e.deltaY > 0 ? -0.01 : 0.01));
     } else {
-      var delta = e.deltaY > 0 ? -0.05 : 0.05;
-      state.zoom = Math.max(0.5, Math.min(4, state.zoom + delta));
-      zoomRange.value = state.zoom;
-      zoomOut.textContent = state.zoom.toFixed(2) + "×";
+      setZoom(state.zoom + (e.deltaY > 0 ? -0.05 : 0.05));
     }
     renderPreview();
   }, { passive: false });
