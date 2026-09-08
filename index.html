@@ -311,7 +311,6 @@
   }
   .seg button:last-child{ border-right: none; }
   .seg button.active{ background: var(--accent); color: var(--accent-ink); }
-  .seg button:disabled{ opacity: .4; cursor: not-allowed; }
 
   .field-note{ font-size: 11.5px; color: var(--muted); }
 
@@ -409,11 +408,7 @@
 
       <details class="panel rail-panel" open>
         <summary>Mask</summary>
-        <div class="seg" id="shapeSeg">
-          <button data-shape="none" type="button">None</button>
-          <button data-shape="circle" class="active" type="button">Circle</button>
-        </div>
-        <div class="slider-row" id="maskSizeRow">
+        <div class="slider-row">
           <label for="maskRange">Size</label>
           <input type="range" id="maskRange" min="0.05" max="1" step="0.01" value="1">
           <output class="mono" id="maskOut">100%</output>
@@ -460,7 +455,7 @@
     artwork: null, artworkName: "",
     tokenCounterName: null, tokenCounter: 1,
     border: null,
-    shape: "circle", maskSize: 1,
+    maskSize: 1,
     maskOffsetX: 0, maskOffsetY: 0, maskMoveMode: false,
     outputSize: "1024",
     zoom: 1, offsetX: 0, offsetY: 0
@@ -476,11 +471,9 @@
   var resultBlock = document.getElementById("resultBlock");
   var resultImg = document.getElementById("resultImg");
   var resultNote = document.getElementById("resultNote");
-  var shapeSeg = document.getElementById("shapeSeg");
   var sizeSeg = document.getElementById("sizeSeg");
   var maskRange = document.getElementById("maskRange");
   var maskOut = document.getElementById("maskOut");
-  var maskSizeRow = document.getElementById("maskSizeRow");
   var moveModeBtn = document.getElementById("moveModeBtn");
   var recenterMaskBtn = document.getElementById("recenterMaskBtn");
   var tokenNameInput = document.getElementById("tokenNameInput");
@@ -527,16 +520,15 @@
       drawPlaceholderArt(ctx, size);
     }
 
-    if(state.shape === "circle"){
-      ctx.globalCompositeOperation = "destination-in";
-      var mcx = size/2 + state.maskOffsetX*size, mcy = size/2 + state.maskOffsetY*size;
-      var r = (size/2) * state.maskSize;
-      ctx.fillStyle = "#fff";
-      ctx.beginPath();
-      ctx.arc(mcx, mcy, r, 0, Math.PI*2);
-      ctx.fill();
-      ctx.globalCompositeOperation = "source-over";
-    }
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-in";
+    var mcx = size/2 + state.maskOffsetX*size, mcy = size/2 + state.maskOffsetY*size;
+    var r = (size/2) * state.maskSize;
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(mcx, mcy, r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
 
     if(state.border){
       ctx.drawImage(state.border, 0, 0, size, size);
@@ -546,7 +538,7 @@
   function renderPreview(){
     var size = stageCanvas.width;
     draw(stageCtx, size);
-    if(state.maskMoveMode && state.shape === "circle"){
+    if(state.maskMoveMode){
       var mcx = size/2 + state.maskOffsetX*size, mcy = size/2 + state.maskOffsetY*size;
       var r = (size/2) * state.maskSize;
       stageCtx.save();
@@ -774,22 +766,7 @@
   wireUpload("file-art", "tile-art", "art");
   wireUpload("file-border", "tile-border", "border");
 
-  // ---- shape segmented control ----
-  function updateShapeButtons(){
-    shapeSeg.querySelectorAll("button").forEach(function(b){
-      b.classList.toggle("active", b.getAttribute("data-shape") === state.shape);
-    });
-    var active = state.shape === "circle";
-    maskSizeRow.style.opacity = active ? "1" : ".4";
-    maskRange.disabled = !active;
-  }
-  shapeSeg.addEventListener("click", function(e){
-    var btn = e.target.closest("button");
-    if(!btn || btn.disabled) return;
-    state.shape = btn.getAttribute("data-shape");
-    updateShapeButtons();
-    renderPreview();
-  });
+  // ---- mask ----
   maskRange.addEventListener("input", function(){
     state.maskSize = Number(maskRange.value);
     maskOut.textContent = Math.round(state.maskSize * 100) + "%";
@@ -809,8 +786,6 @@
     state.maskOffsetX = 0; state.maskOffsetY = 0;
     renderPreview();
   });
-
-  updateShapeButtons();
 
   // ---- size segmented control ----
   sizeSeg.addEventListener("click", function(e){
