@@ -176,6 +176,13 @@
     color: var(--muted);
     box-shadow: var(--shadow);
   }
+  .clear-art{
+    position: absolute; top: 8px; right: 8px;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--surface); border: 1px solid var(--border);
+    font-size: 14px; line-height: 1; display: flex; align-items: center; justify-content: center;
+    z-index: 3; color: var(--ink); box-shadow: var(--shadow); cursor: pointer;
+  }
 
   .stage-controls{
     max-width: 560px; margin: 16px auto 0;
@@ -260,6 +267,7 @@
   details.rail-panel:not([open]) > summary{ margin: 0; }
 
   .tiles{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .tiles.solo{ grid-template-columns: minmax(0, 160px); }
   .tile{
     position: relative;
     aspect-ratio: 1/1;
@@ -377,7 +385,9 @@
       </div>
       <div class="stage-frame" id="stageFrame">
         <canvas id="stageCanvas" width="800" height="800"></canvas>
-        <div class="empty-note" id="emptyNote"><span>Upload artwork to begin &mdash; this is a placeholder</span></div>
+        <div class="empty-note" id="emptyNote"><span>Drop artwork here, or click to upload</span></div>
+        <button class="clear-art" id="clearArtBtn" type="button" title="Remove artwork" aria-label="Remove artwork" hidden>&times;</button>
+        <input type="file" id="file-art" accept="image/*" hidden>
       </div>
 
       <div class="stage-controls">
@@ -396,22 +406,17 @@
     </section>
 
     <aside class="rail">
-      <div class="panel rail-panel">
-        <h2>Layers</h2>
-        <div class="tiles">
-          <div class="tile" id="tile-art" tabindex="0">
-            <input type="file" id="file-art" accept="image/*">
-            <div class="label">Artwork</div>
-            <div class="caption">required</div>
-          </div>
+      <details class="panel rail-panel" open>
+        <summary>Border</summary>
+        <div class="tiles solo">
           <div class="tile" id="tile-border" tabindex="0">
             <input type="file" id="file-border" accept="image/*">
             <div class="label">Border</div>
             <div class="caption">drawn on top</div>
           </div>
         </div>
-        <p class="field-note">Border is an optional PNG, stretched to fill the square &mdash; leave the middle transparent so the masked art shows through.</p>
-      </div>
+        <p class="field-note">Optional PNG, stretched to fill the square &mdash; leave the middle transparent so the masked art shows through.</p>
+      </details>
 
       <details class="panel rail-panel" open>
         <summary>Mask</summary>
@@ -472,7 +477,10 @@
 
   var stageCanvas = document.getElementById("stageCanvas");
   var stageCtx = stageCanvas.getContext("2d");
+  var stageFrame = document.getElementById("stageFrame");
   var emptyNote = document.getElementById("emptyNote");
+  var clearArtBtn = document.getElementById("clearArtBtn");
+  var fileArtInput = document.getElementById("file-art");
   var zoomRange = document.getElementById("zoomRange");
   var zoomOut = document.getElementById("zoomOut");
   var exportBtn = document.getElementById("exportBtn");
@@ -727,6 +735,7 @@
       stageCtx.restore();
     }
     emptyNote.style.display = state.artwork ? "none" : "flex";
+    clearArtBtn.hidden = !state.artwork;
     if(schedule !== false) scheduleFitCheck();
   }
 
@@ -911,13 +920,22 @@
         state.border = loaded.img;
         computeHole();
       }
-      setTileThumb(tile, loaded.img, file.name);
+      if(tile) setTileThumb(tile, loaded.img, file.name);
       exportBtn.disabled = !state.artwork;
       updateNamePreview();
       renderPreview();
     }).catch(function(){
       setStatus("Couldn't read that file — try a PNG, JPG, or WebP.", "err");
     });
+  }
+
+  function clearArt(){
+    releaseLayer("art");
+    state.artwork = null; state.artworkName = "";
+    fileArtInput.value = "";
+    exportBtn.disabled = !state.artwork;
+    updateNamePreview();
+    renderPreview();
   }
 
   function setTileThumb(tile, img, name){
@@ -946,10 +964,8 @@
   }
 
   function clearTile(tile){
-    var kind = tile.id === "tile-art" ? "art" : "border";
-    releaseLayer(kind);
-    if(kind === "art"){ state.artwork = null; state.artworkName = ""; }
-    if(kind === "border"){ state.border = null; computeHole(); }
+    releaseLayer("border");
+    state.border = null; computeHole();
     tile.classList.remove("has-image");
     var thumb = tile.querySelector("img.thumb");
     if(thumb) thumb.remove();
@@ -964,7 +980,27 @@
     renderPreview();
   }
 
-  wireUpload("file-art", "tile-art", "art");
+  // Artwork drops onto the stage itself instead of a rail tile: drag-and-drop
+  // always works there, and a click opens the file picker only while the
+  // stage is empty, so it doesn't fight with drag-to-pan once art is loaded.
+  fileArtInput.addEventListener("change", function(){
+    var file = fileArtInput.files && fileArtInput.files[0];
+    if(file) handleFile(file, null, "art");
+  });
+  stageFrame.addEventListener("dragover", function(e){ e.preventDefault(); });
+  stageFrame.addEventListener("drop", function(e){
+    e.preventDefault();
+    var file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if(file) handleFile(file, null, "art");
+  });
+  stageFrame.addEventListener("click", function(){
+    if(!state.artwork) fileArtInput.click();
+  });
+  clearArtBtn.addEventListener("click", function(e){
+    e.preventDefault(); e.stopPropagation();
+    clearArt();
+  });
+
   wireUpload("file-border", "tile-border", "border");
 
   // ---- mask ----
